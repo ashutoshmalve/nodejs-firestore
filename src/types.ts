@@ -25,3 +25,7 @@ export type AnyJs = null|undefined|boolean|number|string|object;
 
 // tslint:disable-next-line:no-any
 export type AnyDuringMigration = any;
+
+export interface FirestoreError extends Error {
+  code: number;
+}

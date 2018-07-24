@@ -16,6 +16,8 @@
 
 'use strict';
 
+import * as api from '../protos/firestore_proto_api';
+
 import assert from 'assert';
 import rbtree from 'functional-red-black-tree';
 import through2 from 'through2';
@@ -23,6 +25,9 @@ import through2 from 'through2';
 import {backoffPkg} from './backoff';
 import {Timestamp} from './timestamp';
 import {ResourcePath} from './path';
+import {FirestoreError} from './types';
+
+// tslint:disable:variable-name
 
 /*!
  * Injected.
@@ -71,11 +76,11 @@ const WATCH_TARGET_ID = 0x1;
 /*!
  * The change type for document change events.
  */
-const ChangeType = {
-  added: 'added',
-  modified: 'modified',
-  removed: 'removed',
-};
+enum ChangeType {
+  added = 'added',
+  modified = 'modified',
+  removed = 'removed',
+}
 
 /*!
  * List of GRPC Error Codes.
@@ -83,53 +88,53 @@ const ChangeType = {
  * This corresponds to
  * {@link https://github.com/grpc/grpc/blob/master/doc/statuscodes.md}.
  */
-const GRPC_STATUS_CODE = {
+enum GRPC_STATUS_CODE {
   // Not an error; returned on success.
-  OK: 0,
+  OK = 0,
 
   // The operation was cancelled (typically by the caller).
-  CANCELLED: 1,
+  CANCELLED = 1,
 
   // Unknown error. An example of where this error may be returned is if a
   // Status value received from another address space belongs to an error-space
   // that is not known in this address space. Also errors raised by APIs that
   // do not return enough error information may be converted to this error.
-  UNKNOWN: 2,
+  UNKNOWN = 2,
 
   // Client specified an invalid argument. Note that this differs from
   // FAILED_PRECONDITION. INVALID_ARGUMENT indicates arguments that are
   // problematic regardless of the state of the system (e.g., a malformed file
   // name).
-  INVALID_ARGUMENT: 3,
+  INVALID_ARGUMENT = 3,
 
   // Deadline expired before operation could complete. For operations that
   // change the state of the system, this error may be returned even if the
   // operation has completed successfully. For example, a successful response
   // from a server could have been delayed long enough for the deadline to
   // expire.
-  DEADLINE_EXCEEDED: 4,
+  DEADLINE_EXCEEDED = 4,
 
   // Some requested entity (e.g., file or directory) was not found.
-  NOT_FOUND: 5,
+  NOT_FOUND = 5,
 
   // Some entity that we attempted to create (e.g., file or directory) already
   // exists.
-  ALREADY_EXISTS: 6,
+  ALREADY_EXISTS = 6,
 
   // The caller does not have permission to execute the specified operation.
   // PERMISSION_DENIED must not be used for rejections caused by exhausting
   // some resource (use RESOURCE_EXHAUSTED instead for those errors).
   // PERMISSION_DENIED must not be used if the caller can not be identified
   // (use UNAUTHENTICATED instead for those errors).
-  PERMISSION_DENIED: 7,
+  PERMISSION_DENIED = 7,
 
   // The request does not have valid authentication credentials for the
   // operation.
-  UNAUTHENTICATED: 16,
+  UNAUTHENTICATED = 16,
 
   // Some resource has been exhausted, perhaps a per-user quota, or perhaps the
   // entire file system is out of space.
-  RESOURCE_EXHAUSTED: 8,
+  RESOURCE_EXHAUSTED = 8,
 
   // Operation was rejected because the system is not in a state required for
   // the operation's execution. For example, directory to be deleted may be
@@ -149,14 +154,14 @@ const GRPC_STATUS_CODE = {
   //      REST Get/Update/Delete on a resource and the resource on the
   //      server does not match the condition. E.g., conflicting
   //      read-modify-write on the same resource.
-  FAILED_PRECONDITION: 9,
+  FAILED_PRECONDITION = 9,
 
   // The operation was aborted, typically due to a concurrency issue like
   // sequencer check failures, transaction aborts, etc.
   //
   // See litmus test above for deciding between FAILED_PRECONDITION, ABORTED,
   // and UNAVAILABLE.
-  ABORTED: 10,
+  ABORTED = 10,
 
   // Operation was attempted past the valid range. E.g., seeking or reading
   // past end of file.
@@ -171,34 +176,34 @@ const GRPC_STATUS_CODE = {
   // OUT_OF_RANGE. We recommend using OUT_OF_RANGE (the more specific error)
   // when it applies so that callers who are iterating through a space can
   // easily look for an OUT_OF_RANGE error to detect when they are done.
-  OUT_OF_RANGE: 11,
+  OUT_OF_RANGE = 11,
 
   // Operation is not implemented or not supported/enabled in this service.
-  UNIMPLEMENTED: 12,
+  UNIMPLEMENTED = 12,
 
   // Internal errors. Means some invariants expected by underlying System has
   // been broken. If you see one of these errors, Something is very broken.
-  INTERNAL: 13,
+  INTERNAL = 13,
 
   // The service is currently unavailable. This is a most likely a transient
   // condition and may be corrected by retrying with a backoff.
   //
   // See litmus test above for deciding between FAILED_PRECONDITION, ABORTED,
   // and UNAVAILABLE.
-  UNAVAILABLE: 14,
+  UNAVAILABLE = 14,
 
   // Unrecoverable data loss or corruption.
-  DATA_LOSS: 15,
+  DATA_LOSS = 15,
 
   // Force users to include a default branch:
-  DO_NOT_USE: -1,
-};
+  DO_NOT_USE = -1,
+}
 
 /*!
  * The comparator used for document watches (which should always get called with
  * the same document).
  */
-const DOCUMENT_WATCH_COMPARATOR = (doc1, doc2) => {
+const DOCUMENT_WATCH_COMPARATOR = (doc1:DocumentSnapshot, doc2:DocumentSnapshot) => {
   assert(doc1 === doc2, 'Document watches only support one document.');
   return 0;
 };
@@ -236,22 +241,19 @@ const DOCUMENT_WATCH_COMPARATOR = (doc1, doc2) => {
  * @private
  */
 class Watch {
+  private backoff = new ExponentialBackoff();
+  private requestTag = Firestore.requestTag();
   /**
    * @private
    * @hideconstructor
    *
-   * @param {Firestore} firestore The Firestore Database client.
-   * @param {Object} target - A Firestore 'Target' proto denoting the target to
-   * listen on.
-   * @param {function} comparator - A comparator for QueryDocumentSnapshots that
-   * is used to order the document snapshots returned by this watch.
+   * @param firestore - The Firestore Database client.
+   * @param target - A Firestore 'Target' proto denoting the target to listen
+   * on.
+   * @param comparator - A comparator for QueryDocumentSnapshots that is used to
+   * order the document snapshots returned by this watch.
    */
-  constructor(firestore, target, comparator) {
-    this._firestore = firestore;
-    this._targets = target;
-    this._comparator = comparator;
-    this._backoff = new ExponentialBackoff();
-    this._requestTag = Firestore.requestTag();
+  constructor(private readonly firestore:Firestore, private readonly target:api.Target, private readonly comparator:(left:DocumentSnapshot,right:DocumentSnapshot)=>number) {
   }
 
   /**
@@ -262,7 +264,7 @@ class Watch {
    * reference for this watch.
    * @returns {Watch} A newly created Watch instance.
    */
-  static forDocument(documentRef) {
+  static forDocument(documentRef:DocumentReference) : Watch{
     return new Watch(
         documentRef.firestore, {
           documents: {
@@ -280,7 +282,7 @@ class Watch {
    * @param {Query} query - The query used for this watch.
    * @returns {Watch} A newly created Watch instance.
    */
-  static forQuery(query) {
+  static forQuery(query:Query) : Firestore {
     return new Watch(
         query.firestore, {
           query: query.toProto(),
@@ -298,10 +300,10 @@ class Watch {
    * @param {Error} error An error object.
    * @return {boolean} Whether the error is permanent.
    */
-  isPermanentError(error) {
+  isPermanentError(error:FirestoreError) : boolean {
     if (error.code === undefined) {
       Firestore.log(
-          'Watch.onSnapshot', this._requestTag,
+          'Watch.onSnapshot', this.requestTag,
           'Unable to determine error code: ', error);
       return false;
     }
@@ -328,7 +330,7 @@ class Watch {
    * @param {Error} error A GRPC Error object that exposes an error code.
    * @return {boolean} Whether we need to back off our retries.
    */
-  isResourceExhaustedError(error) {
+  isResourceExhaustedError(error:FirestoreError) : boolean {
     return error.code === GRPC_STATUS_CODE.RESOURCE_EXHAUSTED;
   }
 
@@ -345,17 +347,15 @@ class Watch {
    * the snapshot listener.
    */
   onSnapshot(onNext, onError) {
-    let self = this;
-
     // The sorted tree of QueryDocumentSnapshots as sent in the last snapshot.
     // We only look at the keys.
-    let docTree = rbtree(this._comparator);
+    let docTree = rbtree(this.comparator);
     // A map of document names to QueryDocumentSnapshots for the last sent
     // snapshot.
-    let docMap = new Map();
+    let docMap = new Map<string, QueryDocumentSnapshot>();
     // The accumulates map of document changes (keyed by document name) for the
     // current snapshot.
-    let changeMap = new Map();
+    const changeMap = new Map<string, QueryDocumentSnapshot>();
 
     // The current state of the query results.
     let current = false;
@@ -374,8 +374,8 @@ class Watch {
     const REMOVED = {};
 
     const request = {
-      database: this._firestore.formattedName,
-      addTarget: this._targets,
+      database: this.firestore.formattedName,
+      addTarget: this.target,
     };
 
     // We may need to replace the underlying stream on reset events.
@@ -385,9 +385,9 @@ class Watch {
     let currentStream = null;
 
     /** Helper to clear the docs on RESET or filter mismatch. */
-    const resetDocs = function() {
+    const resetDocs = () => {
       Firestore.log(
-          'Watch.onSnapshot', self._requestTag, 'Resetting documents');
+          'Watch.onSnapshot', this.requestTag, 'Resetting documents');
       changeMap.clear();
       resumeToken = undefined;
 
@@ -401,7 +401,7 @@ class Watch {
     };
 
     /** Closes the stream and calls onError() if the stream is still active. */
-    const closeStream = function(err) {
+    const closeStream = (err:FirestoreError) => {
       if (currentStream) {
         currentStream.unpipe(stream);
         currentStream.end();
@@ -412,7 +412,7 @@ class Watch {
       if (isActive) {
         isActive = false;
         Firestore.log(
-            'Watch.onSnapshot', self._requestTag, 'Invoking onError: ', err);
+            'Watch.onSnapshot', this.requestTag, 'Invoking onError: ', err);
         onError(err);
       }
     };
@@ -421,16 +421,16 @@ class Watch {
      * Re-opens the stream unless the specified error is considered permanent.
      * Clears the change map.
      */
-    const maybeReopenStream = function(err) {
+    const maybeReopenStream = (err:FirestoreError) => {
       if (isActive && !self.isPermanentError(err)) {
         Firestore.log(
-            'Watch.onSnapshot', self._requestTag,
+            'Watch.onSnapshot', this.requestTag,
             'Stream ended, re-opening after retryable error: ', err);
         request.addTarget.resumeToken = resumeToken;
         changeMap.clear();
 
         if (self.isResourceExhaustedError(err)) {
-          self._backoff.resetToMax();
+          this.backoff.resetToMax();
         }
 
         resetStream();
@@ -440,8 +440,8 @@ class Watch {
     };
 
     /** Helper to restart the outgoing stream to the backend. */
-    const resetStream = function() {
-      Firestore.log('Watch.onSnapshot', self._requestTag, 'Opening new stream');
+    const resetStream = () => {
+      Firestore.log('Watch.onSnapshot', this.requestTag, 'Opening new stream');
       if (currentStream) {
         currentStream.unpipe(stream);
         currentStream.end();
@@ -453,29 +453,29 @@ class Watch {
     /**
      * Initializes a new stream to the backend with backoff.
      */
-    const initStream = function() {
-      self._backoff.backoffAndWait().then(() => {
+    const initStream = () => {
+      this.backoff.backoffAndWait().then(() => {
         if (!isActive) {
           Firestore.log(
-              'Watch.onSnapshot', self._requestTag,
+              'Watch.onSnapshot', this.requestTag,
               'Not initializing inactive stream');
           return;
         }
 
         // Note that we need to call the internal _listen API to pass additional
         // header values in readWriteStream.
-        self._firestore
-            .readWriteStream('listen', request, self._requestTag, true)
+        this.firestore
+            .readWriteStream('listen', request, this.requestTag, true)
             .then(backendStream => {
               if (!isActive) {
                 Firestore.log(
-                    'Watch.onSnapshot', self._requestTag,
+                    'Watch.onSnapshot', this.requestTag,
                     'Closing inactive stream');
                 backendStream.end();
                 return;
               }
               Firestore.log(
-                  'Watch.onSnapshot', self._requestTag, 'Opened new stream');
+                  'Watch.onSnapshot', this.requestTag, 'Opened new stream');
               currentStream = backendStream;
               currentStream.on('error', err => {
                 maybeReopenStream(err);
@@ -496,12 +496,12 @@ class Watch {
      * Checks if the current target id is included in the list of target ids.
      * If no targetIds are provided, returns true.
      */
-    const affectsTarget = function(targetIds, currentId) {
+    const affectsTarget = (targetIds:number[]|undefined, currentId:number) => {
       if (targetIds === undefined || targetIds.length === 0) {
         return true;
       }
 
-      for (let targetId of targetIds) {
+      for (const targetId of targetIds) {
         if (targetId === currentId) {
           return true;
         }
@@ -511,10 +511,10 @@ class Watch {
     };
 
     /** Splits up document changes into removals, additions, and updates. */
-    const extractChanges = function(docMap, changes, readTime) {
-      let deletes = [];
-      let adds = [];
-      let updates = [];
+    const extractChanges = (docMap, changes, readTime) => {
+      const deletes = [];
+      const adds = [];
+      const updates = [];
 
       changes.forEach((value, name) => {
         if (value === REMOVED) {
@@ -538,9 +538,9 @@ class Watch {
      * document lookup map. Modified docMap in-place and returns the updated
      * state.
      */
-    const computeSnapshot = function(docTree, docMap, changes) {
+    const computeSnapshot = (docTree, docMap, changes) => {
       let updatedTree = docTree;
-      let updatedMap = docMap;
+      const updatedMap = docMap;
 
       assert(
           docTree.length === docMap.size,
@@ -551,11 +551,11 @@ class Watch {
        * Applies a document delete to the document tree and the document map.
        * Returns the corresponding DocumentChange event.
        */
-      const deleteDoc = function(name) {
+      const deleteDoc = (name) => {
         assert(updatedMap.has(name), 'Document to delete does not exist');
-        let oldDocument = updatedMap.get(name);
-        let existing = updatedTree.find(oldDocument);
-        let oldIndex = existing.index;
+        const oldDocument = updatedMap.get(name);
+        const existing = updatedTree.find(oldDocument);
+        const oldIndex = existing.index;
         updatedTree = existing.remove();
         updatedMap.delete(name);
         return new DocumentChange(
@@ -566,11 +566,11 @@ class Watch {
        * Applies a document add to the document tree and the document map.
        * Returns the corresponding DocumentChange event.
        */
-      const addDoc = function(newDocument) {
-        let name = newDocument.ref.formattedName;
+      const addDoc = (newDocument) => {
+        const name = newDocument.ref.formattedName;
         assert(!updatedMap.has(name), 'Document to add already exists');
         updatedTree = updatedTree.insert(newDocument, null);
-        let newIndex = updatedTree.find(newDocument).index;
+        const newIndex = updatedTree.find(newDocument).index;
         updatedMap.set(name, newDocument);
         return new DocumentChange(ChangeType.added, newDocument, -1, newIndex);
       };
@@ -579,13 +579,13 @@ class Watch {
        * Applies a document modification to the document tree and the document
        * map. Returns the DocumentChange event for successful modifications.
        */
-      const modifyDoc = function(newDocument) {
-        let name = newDocument.ref.formattedName;
+      const modifyDoc = (newDocument) => {
+        const name = newDocument.ref.formattedName;
         assert(updatedMap.has(name), 'Document to modify does not exist');
-        let oldDocument = updatedMap.get(name);
+        const oldDocument = updatedMap.get(name);
         if (!oldDocument.updateTime.isEqual(newDocument.updateTime)) {
-          let removeChange = deleteDoc(name);
-          let addChange = addDoc(newDocument);
+          const removeChange = deleteDoc(name);
+          const addChange = addDoc(newDocument);
           return new DocumentChange(
               ChangeType.modified, newDocument, removeChange.oldIndex,
               addChange.newIndex);
@@ -597,30 +597,30 @@ class Watch {
       // clients (removals, additions, and then modifications). We also need to
       // sort the individual changes to assure that oldIndex/newIndex keep
       // incrementing.
-      let appliedChanges = [];
+      const appliedChanges = [];
 
       changes.deletes.sort((name1, name2) => {
         // Deletes are sorted based on the order of the existing document.
-        return self._comparator(updatedMap.get(name1), updatedMap.get(name2));
+        return this.comparator(updatedMap.get(name1), updatedMap.get(name2));
       });
       changes.deletes.forEach(name => {
-        let change = deleteDoc(name);
+        const change = deleteDoc(name);
         if (change) {
           appliedChanges.push(change);
         }
       });
 
-      changes.adds.sort(self._comparator);
+      changes.adds.sort(this.comparator);
       changes.adds.forEach(snapshot => {
-        let change = addDoc(snapshot);
+        const change = addDoc(snapshot);
         if (change) {
           appliedChanges.push(change);
         }
       });
 
-      changes.updates.sort(self._comparator);
+      changes.updates.sort(this.comparator);
       changes.updates.forEach(snapshot => {
-        let change = modifyDoc(snapshot);
+        const change = modifyDoc(snapshot);
         if (change) {
           appliedChanges.push(change);
         }
@@ -638,13 +638,13 @@ class Watch {
      * Assembles a new snapshot from the current set of changes and invokes the
      * user's callback. Clears the current changes on completion.
      */
-    const push = function(readTime, nextResumeToken) {
-      let changes = extractChanges(docMap, changeMap, readTime);
-      let diff = computeSnapshot(docTree, docMap, changes);
+    const push =(readTime, nextResumeToken) => {
+      const changes = extractChanges(docMap, changeMap, readTime);
+      const diff = computeSnapshot(docTree, docMap, changes);
 
       if (!hasPushed || diff.appliedChanges.length > 0) {
         Firestore.log(
-            'Watch.onSnapshot', self._requestTag,
+            'Watch.onSnapshot', this.requestTag,
             'Sending snapshot with %d changes and %d documents',
             diff.appliedChanges.length, diff.updatedTree.length);
         onNext(
@@ -663,8 +663,8 @@ class Watch {
      * Returns the current count of all documents, including the changes from
      * the current changeMap.
      */
-    const currentSize = function() {
-      let changes = extractChanges(docMap, changeMap);
+    const currentSize = () => {
+      const changes = extractChanges(docMap, changeMap);
       return docMap.size + changes.adds.length - changes.deletes.length;
     };
 
@@ -675,7 +675,7 @@ class Watch {
             proto => {
               if (proto.targetChange) {
                 Firestore.log(
-                    'Watch.onSnapshot', self._requestTag,
+                    'Watch.onSnapshot', this.requestTag,
                     'Processing target change');
                 const change = proto.targetChange;
                 const noTargetIds =
@@ -713,11 +713,11 @@ class Watch {
 
                 if (change.resumeToken &&
                     affectsTarget(change.targetIds, WATCH_TARGET_ID)) {
-                  this._backoff.reset();
+                  this.backoff.reset();
                 }
               } else if (proto.documentChange) {
                 Firestore.log(
-                    'Watch.onSnapshot', self._requestTag,
+                    'Watch.onSnapshot', this.requestTag,
                     'Processing change event');
 
                 // No other targetIds can show up here, but we still need to see
@@ -743,11 +743,11 @@ class Watch {
 
                 if (changed) {
                   Firestore.log(
-                      'Watch.onSnapshot', self._requestTag,
+                      'Watch.onSnapshot', this.requestTag,
                       'Received document change');
                   const snapshot = new DocumentSnapshot.Builder();
                   snapshot.ref = new DocumentReference(
-                      self._firestore,
+                      this.firestore,
                       ResourcePath.fromSlashSeparatedString(name));
                   snapshot.fieldsProto = document.fields || {};
                   snapshot.createTime =
@@ -757,20 +757,20 @@ class Watch {
                   changeMap.set(name, snapshot);
                 } else if (removed) {
                   Firestore.log(
-                      'Watch.onSnapshot', self._requestTag,
+                      'Watch.onSnapshot', this.requestTag,
                       'Received document remove');
                   changeMap.set(name, REMOVED);
                 }
               } else if (proto.documentDelete || proto.documentRemove) {
                 Firestore.log(
-                    'Watch.onSnapshot', self._requestTag,
+                    'Watch.onSnapshot', this.requestTag,
                     'Processing remove event');
                 const name =
                     (proto.documentDelete || proto.documentRemove).document;
                 changeMap.set(name, REMOVED);
               } else if (proto.filter) {
                 Firestore.log(
-                    'Watch.onSnapshot', self._requestTag,
+                    'Watch.onSnapshot', this.requestTag,
                     'Processing filter update');
                 if (proto.filter.count !== currentSize()) {
                   // We need to remove all the current results.
@@ -779,13 +779,13 @@ class Watch {
                   resetStream();
                 }
               } else {
-                closeStream(new Error(
+                closeStream(new FirestoreError(
                     'Unknown listen response type: ' + JSON.stringify(proto)));
               }
             })
         .on('end', () => {
           Firestore.log(
-              'Watch.onSnapshot', self._requestTag, 'Processing stream end');
+              'Watch.onSnapshot', this.requestTag, 'Processing stream end');
           if (currentStream) {
             // Pass the event on to the underlying stream.
             currentStream.end();
@@ -793,7 +793,7 @@ class Watch {
         });
 
     return () => {
-      Firestore.log('Watch.onSnapshot', self._requestTag, 'Ending stream');
+      Firestore.log('Watch.onSnapshot', this.requestTag, 'Ending stream');
       // Prevent further callbacks.
       isActive = false;
       onNext = () => {};
