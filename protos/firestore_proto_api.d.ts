@@ -357,9 +357,9 @@ export declare namespace firestoreV1beta1ApiClientInterfaces {
     booleanValue?: boolean;
     integerValue?: string;
     doubleValue?: number;
-    timestampValue?: string;
+    timestampValue?: Timestamp;
     stringValue?: string;
-    bytesValue?: string;
+    bytesValue?: Buffer;
     referenceValue?: string;
     geoPointValue?: LatLng;
     arrayValue?: ArrayValue;
